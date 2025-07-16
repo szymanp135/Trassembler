@@ -1,0 +1,577 @@
+/*
+ *	THIS C CODE IS DEPRECATED AND NO LOGNER COMPILES. THIS IS AN OLD
+ *	VERSION OF TRASSEMBLER. IT IS MESSY, UGLY, AND DOES NOT REALLY WORK.
+ *	IT SHOULD BE USED FOR ARCHIVAL REASONS ONLY
+ *
+ *	Trassembler - Tranzystron 16000 assembler by Paweł Szymański
+ *	
+ *	This software is meant to translate assembly code in given file
+ *	to Tranzystron 16000 machine code.
+ *
+ *	Error code:
+ *	0x10 - no file passed
+ *	0x11 - cannot open file
+ *	0x12 - wrong syntax (general)
+ *	0x13 - wrong key word
+ *	0x14 - argument too long
+ *	0x15 - invalid argument format
+ *	0x16 - undefined variable
+ */
+
+#include <stdio.h>
+#include <stdlib.h>
+#include "key-words.h"
+
+#define MAX_ARG_LENGTH 80
+
+// program memory
+short memory[0x10000] = { 0 };
+short* pointer = memory;
+
+// dynamic array of variables
+long*  vars_h = NULL;
+short* vars_v = NULL;
+int vars_size = 0;
+
+FILE* file;
+char* code = NULL;
+int code_size = 0;
+int code_ptr = 0;
+
+long read_line(int);
+void dot_arg(char*, char, int);
+long long read_value(char*);
+unsigned long hash(char*);
+long long str2uint(char*);
+int insert_code(char*, int);
+void write_mem(short);
+char normalize(char);
+void print_mem(void);
+void error(int, int);
+
+int main(int argc, char **argv) {
+
+	FILE* outh;
+	FILE* outl;
+	char* name;
+	int current_line = 0;
+	long i = 0, j;
+	char* namel = "_low.out";
+	char* nameh = "_high.out";
+
+	// print welcome message
+	printf("Trassembler v0.4 [15.09.2024]\nAssembler for Tranzystron 16000 by Paweł Szymański\n");
+
+	// check whether code file directory has been passed
+	if(argc < 2){ // if it hasn't output message and quit
+		printf("No code given to assemble.\n");
+		return 0x10;
+	}
+
+	// open file and save it in 'code' string
+	if(insert_code(argv[1], 0)) {
+		printf("Couldn't open file: %s\n", argv[1]);
+		return 0x11;
+	}
+
+	// print information about maximum argument length
+	printf("\nMaximum argument length is: %d\n", MAX_ARG_LENGTH);
+
+	// loop through whole file
+	while((i & 0x00c0) != 0x00c0) { // stop on EOF
+		i = read_line(++current_line);
+		if((i & 0x00c0) == 0x0080) { continue; } // continue when dotword
+
+		write_mem(i & 0x0000003f); // write instruction
+
+		if((i & 0x00c0) == 0x0040)
+			write_mem((i & 0xffff0000) >> 16); // write argument
+	}
+
+	// print memory contents
+	printf("\nFinal Memory contents:");
+	print_mem();
+
+	// free memory
+	if(vars_h != NULL) { free(vars_h); }
+	if(vars_v != NULL) { free(vars_v); }
+	if(code != NULL) free(code);
+
+	// open output file
+	if(argc < 3) { // if file name hasn't been specified
+		outl = fopen("a_low.out", "w");
+		outh = fopen("a_high.out", "w");
+	}
+	else { // if it has been
+		i = 0;
+		while(argv[2][i]) ++i;
+		name = malloc(i + 8);
+		for(j = 0; j < i; ++j) name[j] = argv[2][j];
+
+		do { name[j] = namel[j - i]; ++j; } while(namel[j - i]);
+		outl = fopen(name, "w"); printf("outl: %s\n", name);
+
+		j = i;
+		name = realloc(name, i + 9);
+		do { name[j] = nameh[j - i]; ++j; } while(nameh[j - i]);
+		outh = fopen(name, "w"); printf("outh: %s\n", name);
+	}
+
+	for(i = 0; i < pointer - memory; ++i) {
+		putc((char)memory[i], outl);
+		putc((char)(memory[i] >> 8), outh);
+	}
+	
+	fclose(outl); fclose(outh);
+
+	return 0;
+}
+
+
+
+/*
+ * read_line function reads line of code and translates it into assmebly
+ *
+ * returns 32-bit value in format: upper 16 bits as argument and lower
+ * 16 bits as instruction code. If no instruction, returns value which
+ * logical AND with 0x00c0 gives value other than 0
+ */
+
+long read_line(int current_line) {
+
+	char prev_ch = ' ', ch; // for read characters
+	char key[4] = { 0 }; // char array for key_word
+	char arg[MAX_ARG_LENGTH] = { 0 }; // for argument
+	long long arg_val;
+	char current_symbol = 0; // for tracking current symbol
+	unsigned long key_hash; // for key-word hashing
+	char current_key_word = -1;
+	// token tells do we translate key-word or argument
+	unsigned char token = 0;
+	int i;
+	long return_inst;
+
+
+	// look through all characters in line and get key-word and argument
+	while((ch = code[code_ptr++]) != '\n') {
+
+		// return End sign if read whole code
+		if(ch == 0) return 0x00c0;
+
+		// search for symbol other than blank space or tabulator
+		if(ch == ' ' || ch == '\t') {
+			if(!(prev_ch == ' ' || prev_ch == '\t')) {
+				if(token == 1 || token == 100)
+					current_symbol = 0;
+				++token;
+			}
+			prev_ch = ch;
+			continue;
+		}
+		// if ';' is met, rest of the line is comment so skip it
+		if(ch == ';') {
+			while((ch = code[code_ptr++]) != '\n');
+			break;
+		}
+
+		// check first non-blank symbol
+		if(token == 0) {
+			ch = normalize(ch);
+			if(ch >= 'A' && ch <= 'Z')
+				token = 1;
+			else if (ch == '.') { token = 100; continue; }
+			// if it isn't a letter or dot, then it is an error
+			else error(0x12, current_line);
+		}
+
+		// read key-word
+		if(token == 1 || token == 100) {
+			if(current_symbol > 2)
+				error(0x13, current_line); // wrong key-word
+			key[current_symbol++] = ch;
+		}
+
+		// read argument
+		if(token > 1 && token != 100) {
+			if(current_symbol >= MAX_ARG_LENGTH)
+				error(0x14, current_line); // argument too long
+			if((prev_ch == ' ' || prev_ch == '\t') &&
+			   (token != 2 && token != 101)) {
+			   	arg[current_symbol++] = ' ';
+			}
+			arg[current_symbol++] = ch;
+		}
+
+		// set prev_ch to ch
+		prev_ch = ch;
+	}
+
+	// if no key-word was found, skip the line
+	if(token == 0) return 0x0080;
+
+	//hash key-word and match with one from "key-words.h" file
+	key_hash = hash(key);
+	for(i = 0; i < KEY_WORDS; ++i)
+		if(key_hash == hash(key_words[i])) { // found matching key-word
+			current_key_word = i;
+			break;
+		}
+	
+	if(current_key_word == -1) error(0x13, current_line); // wrong key-word
+
+	// if key-word is an instruction, handle argument for instruction
+	if(current_key_word < 44 && token < 100) {
+		return_inst = instr_code[current_key_word];
+		if(token > 1) { // if an argument is present
+			arg_val = read_value(arg);
+			if(arg_val == ((long long)0x1 << 63))
+				error(0x15, current_line);
+			else if(arg_val == (((long long)0x1 << 63) + 1))
+				error(0x16, current_line);
+			return_inst |= arg_val << 16;
+			return_inst |= 0x0040; // add argument presence sign
+		}
+
+	}
+	// if key-word is a dotword, handle argument for one
+	else if(current_key_word >= 44 && token >= 100) {
+		return_inst = dot_code[current_key_word - 44] | 0x0080;
+		if(token > 100) { // if an argument is present
+			dot_arg(arg, return_inst & 0x007f, current_line);
+		}
+	}
+
+	return return_inst;
+}
+
+/*
+ * handles dot words arguments
+ */
+void dot_arg(char* arg, char key, int current_line) {
+	
+	char ch;
+	short val;
+	int i;
+	long long addr;
+	char name[MAX_ARG_LENGTH] = { 0 };
+
+	switch(key) {
+		case 0x01: { // .org
+			if((addr = read_value(arg)) == ((long long)0x1 << 63))
+				error(0x15, current_line);
+			if (addr == (((long long)0x1 << 63) + 1))
+				error(0x16, current_line);
+			pointer = memory + addr;
+		} break;
+		case 0x02: { // .str
+			// save string name to different string (not arg)
+			for(; i < MAX_ARG_LENGTH; ++i) {
+				ch = *arg++;
+				if(ch == ' ' || ch == '\t') break;
+				name[i] = ch;
+			}
+
+			// find first quote sign "
+			while((ch = *arg++) != '\"')
+				if(ch == '\n')
+					error(0x15, current_line);
+			
+			// alocate space for new string
+			vars_h = realloc(vars_h, (++vars_size)*sizeof(long));
+			vars_v = realloc(vars_v, vars_size*sizeof(short));
+
+			// add new string
+			vars_h[vars_size - 1] = hash(name);
+			vars_v[vars_size - 1] = pointer - memory;
+
+			// write string to memory
+			while((ch = *arg++) != '\"')
+				if(ch == '\n') {
+					error(0x15, current_line);
+				}
+				else
+					write_mem(ch);
+			write_mem(0); // write terminating char
+		} break;
+		case 0x03: { // .var
+			// save variable name to different string
+			for(; i < MAX_ARG_LENGTH; ++i) {
+				ch = *arg++;
+				if(ch == ' ' || ch == '\t') break;
+				name[i] = ch;
+			}
+
+			// convert rest of the string into number
+			if((val = (short)str2uint(arg)) == ((long long)0x1 << 63))
+				error(0x15, current_line);
+
+			// allocate space for new variable
+			vars_v = realloc(vars_v, (++vars_size)*sizeof(short));
+			vars_h = realloc(vars_h, vars_size*sizeof(long));
+
+			// add new variable
+			vars_h[vars_size - 1] = hash(name);
+			vars_v[vars_size - 1] = val;
+		} break;
+		case 0x04: { // .use
+			// todo:
+			// change reading file from file to downloading file
+			// to string and then reading string so that we can
+			// append string with new code (or insert it inside)
+			if(insert_code(arg, code_ptr)) {
+				printf("Couldn't open file: %s\n", arg);
+				error(0x11, current_line);
+			}
+		} break;
+		case 0x05: { // .lab
+			// allocate space for new label
+			vars_h = realloc(vars_h, (++vars_size)*sizeof(long));
+			vars_v = realloc(vars_v, (vars_size)*sizeof(short));
+
+			// add new label
+			vars_h[vars_size - 1] = hash(arg);
+			vars_v[vars_size - 1] = pointer - memory;
+		} break;
+	}
+}
+
+/*
+ * returns value of an argument
+ * if argument is not a number then returns (0x1 << 63)
+ * if argument is a variable then doesn't exist returns (0x1 << 63 + 1)
+ */
+long long read_value(char* arg) {
+	
+	short value = 0;
+	int i;
+
+	// check if argument is a variable
+	if(normalize(arg[0]) >= 'A' && normalize(arg[0]) <= 'Z') {
+		for(i = 0; i < vars_size; ++i)
+			if(hash(arg) == vars_h[i]) break;
+		if(i == vars_size) return ((long long)0x1 << 63) + 1;
+		return vars_v[i];
+	}
+
+	// otherwise it is a number
+	value = (short)str2uint(arg);
+
+	return value;
+}
+
+/*
+ * string hashing function; hashes given string of arbitrary length as 32-bit
+ * unsigned long and returns its value
+ */
+unsigned long hash(char* str) {
+	unsigned long h = 5381;
+	int ch;
+
+	while(ch = *str++) {
+		// switch letters to upper case for case-insensitivity
+		ch = normalize(ch);
+		h = ((h << 5) + h) + ch;
+	}
+	
+	return h;
+}
+
+/*
+ * converts string into unsigned integer
+ * no prefix means decimal base, '$' - hexadeciaml, '%' - binary, '&' - octal
+ */
+long long str2uint(char* str) {
+	unsigned long long num = 0;
+	char base = 10;
+	char ch;
+
+	// set base
+	switch(str[0]) {
+		case '$': base = 16; break;
+		case '%': base = 2;  break;
+		case '&': base = 8;  break;
+		default: --str; break;
+	}
+	++str; // omit first character (might be eg. '$' sign)
+
+	while(ch = *str++) { // read string character by character
+		ch = normalize(ch);
+		// check whether char is a valid digit
+		if	(base == 16 && ch >= 'A' && ch <= 'F') ch -= 'A' - 10;
+		else if (ch >= '0' &&
+			(((base == 10 || base == 16) && ch <= '9') ||
+			 (base == 8 && ch <= '7') ||
+			 (base == 2 && ch <= '1')
+			)
+		)
+			ch -= '0';
+		else return (long long)0x1 << 63; // if string is invalid
+
+		// add digit to number
+		num *= base;
+		num += ch;
+	}
+	return num;
+}
+
+/*
+ * inserts contents of 'dir' file to current code @ pos
+ */
+int insert_code(char* dir, int pos) {
+	
+	FILE* file;
+	char* new_code = NULL;
+	int new_code_size = 0, new_code_ptr = 0;
+	int i;
+	char ch;
+
+	if(!(file = fopen(dir, "r"))) return 0x11;
+	printf("Successfully opened file: \"%s\"\n", dir);
+
+	// read whole 'dir' file
+	while((ch = getc(file)) != EOF) {
+		if(new_code_ptr >= new_code_size) { // append array if needed
+			new_code_size += 128;
+			new_code = realloc(new_code, new_code_size);
+		}
+		new_code[new_code_ptr++] = ch;
+	}
+	fclose(file); // close file
+	// change new_code size from blocky to precise
+	new_code = realloc(new_code, new_code_ptr);
+	new_code_size = new_code_ptr;
+	
+	// append code size
+	code_size += new_code_size;
+	code = realloc(code, code_size);
+	// move code to make space for one to be inserted
+	for(i = code_size - new_code_size - 1; i >= pos; --i) {
+		code[i + new_code_size] = code[i];
+	}
+	// insert new code
+	for(i = pos; i < pos + new_code_size; ++i) {
+		code[i] = new_code[i - pos];
+	}
+
+	// add terminating byte when inserting for the first time
+	if(code_size == new_code_size) { 
+		code = realloc(code, ++code_size);
+		code[code_size-1] = 0;
+	}
+
+	free(new_code);
+
+	return 0;
+}
+
+/*
+ * normalizes char to upper case
+ */
+char normalize(char ch) {
+	if(ch >= 'a' && ch <= 'z') ch -= 'a' - 'A';
+	return ch;
+}
+
+/*
+ * writes value to memory
+ */
+void write_mem(short v) {
+	*pointer++ = v;
+}
+
+unsigned short* min(unsigned short* a, unsigned short* b) {
+	return (a < b) ? a : b;
+}
+
+/*
+ * prints memory contents in 'hexdump -C'-like style
+ */
+void print_mem(void) {
+
+	unsigned short* i = memory;
+	unsigned short* j;
+	unsigned short* m;
+	long p, k;
+
+	short last = 0;
+	char print = 0, last_print = 1;
+
+	// loop through whole memory
+	while(i < (unsigned short*)(pointer - 1)) {
+		j = i;
+
+		m = min(i+8, pointer - 1);
+
+		// loop through next bytes and check whether they are all
+		// the same as the last one from previous line
+		print = 0;
+		for(; i < m; ++i) if(*i != last) { print = 1; break; }
+		// if they are all the same, skip the line
+		if(!print && m != (unsigned short*)(pointer - 1)) {
+			for(; i < m; ++i); last_print = 0;
+			continue;
+		}
+
+		// print astericks to inform about multiple same lines
+		if(last_print == 0) printf("\n****  (%04x)", last);
+		last_print = 1;
+
+		i = j;
+
+		// print byte index
+		printf("\n%04x: ", i - (unsigned short*)memory);
+
+		// print bytes' hexadecimal values
+		for(; i < m; ++i) printf(" %04x", *i);
+
+		// align ascii section if needed
+		p = pointer - memory - 1;
+		if(m == (unsigned short*)(pointer - 1)) {
+			p &= 0x07;
+			if(p != 0)
+				for(k = 0; k < 8 - p; ++k)
+					printf("     ");
+		}
+
+		// print bytes in ascii
+		i = j;
+		printf("\t\t| ");
+		for(; i < m; ++i) {
+			// upper 8 bits of byte
+			if((char)(*i>>8) > 0x1f && (char)(*i>>8) < 0x7f)
+				printf("%c", (char)(*i>>8));
+			else printf(".");
+
+			// lower 8 bits of byte
+			if((char)(*i) > 0x1f && (char)(*i) < 0x7f)
+				printf("%c", (char)(*i));
+			else printf(".");
+		}
+
+		printf(" |");
+		last = *(i-1);
+	}
+	printf("\n\n");
+}
+
+/*
+ * error function prints what error occurred and where in the code and
+ * exits program
+ */
+void error(int err_code, int line) {
+	printf("Error at line %d: %02x - ", line, err_code);
+	switch(err_code) {
+		case 0x11: printf("Cannot open file.\n"); break;
+		case 0x12: printf("Wrong syntax (general).\n"); break;
+		case 0x13: printf("Wrong key word.\n"); break;
+		case 0x14: printf("Argument too long.\n"); break;
+		case 0x15: printf("Invalid argument format.\n"); break;
+		case 0x16: printf("Undefined variable.\n"); break;
+	}
+
+	if(vars_h != NULL) free(vars_h);
+	if(vars_v != NULL) free(vars_v);
+	if(code   != NULL) free(code);
+
+	exit(err_code);
+}
