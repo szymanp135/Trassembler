@@ -1,6 +1,6 @@
 /*
  *	Trassembler - Tranzystron 16000 assembler by Paweł Szymański
- *	Developed: 29.06.2025 - 4.07.2025
+ *	Developed: 29.06.2025 - 23.07.2025
  *
  *	This software is meant to translate assembly code in given file
  *	to Tranzystron 16000 machine code.
