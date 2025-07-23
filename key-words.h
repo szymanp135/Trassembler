@@ -6,6 +6,7 @@
 
 #define INSTRUCTIONS 44
 #define KEY_WORDS 53
+#define KEYWORD_LENGTH 4
 
 #define loa 0x10
 #define lra 0x11
