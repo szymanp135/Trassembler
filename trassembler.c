@@ -378,7 +378,7 @@ int read_string(char* string, char* arg) {
 int evaluate_expression(char* string, int* result, int machine_pointer,
 	struct variable_tree_node* root, int care_about_result) {
 
-	int i = 0, j = 0;
+	int i = 0, j = 0, k = 0;
 	int value = 0;
 	int res = 0, len = 0;
 	int result_int = 0;
@@ -405,7 +405,10 @@ int evaluate_expression(char* string, int* result, int machine_pointer,
 					value += machine_pointer;
 					tokens[i++] = value;
 				}
-				else if(res < 0 && !(res == -2 && !care_about_result))
+				/* Increment inappropriate args count if don't care about result */
+				else if (res == -2 && !care_about_result)
+					k++;
+				else if(res < 0)
 					return -1;
 			}
 			/* If succeeded in tokenization then add token to token array */
@@ -424,8 +427,13 @@ int evaluate_expression(char* string, int* result, int machine_pointer,
 	}
 
 	/* No expression (empty arg) */
-	if(!i)
+	if(!i) {
+		/* Found only invalid tokens but don't care about result */
+		if (!care_about_result && k)
+			return 80;
+		/* No args */
 		return 78;
+	}
 
 	/* Change tokens order to RPN */
 	res = shunting_yard(tokens, &i);
@@ -658,9 +666,15 @@ int preprocess_code(char* code, int* code_size, int* machine_pointer,
 				if(res) {
 					if(res == 78) /* Skip if no arg present */
 						continue;
-					else if(res == 79) /*  */
+					else if(res == 79) /* Overflow */
 						fprintf(stderr, "\nError: Expression value "
 							"overflow @ line: %d\n", line_num);
+					else if (res == 80) {
+						/* Increment machine pointer because there is an argument */
+						/* (just invalid) */
+						(*machine_pointer)++;
+						continue;
+					}
 					else
 						fprintf(stderr, "\nError: Wrong argument @ line: "
 							"%d\n", line_num);
@@ -703,7 +717,7 @@ int translate(char* filename, short* machine, int* machine_pointer,
 		return res;
 	printf("\nPreprocessed \"%s\"\n", filename);
 
-	/*  */
+	/* Reset machine pointer after preprocessing file */
 	*machine_pointer = 0;
 
 	while(code_pointer < MEMORY_SIZE && code[code_pointer]) {
